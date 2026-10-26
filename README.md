@@ -1,6 +1,10 @@
 # LerArquivoExecutaSQL V2
 
-[![Licença MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-blue.svg)](LICENSE)
+[![Contributors][contributors-shield]][contributors-url]
+[![Forks][forks-shield]][forks-url]
+[![Stargazers][stars-shield]][stars-url]
+[![Issues][issues-shield]][issues-url]
+[![MIT License][license-shield]][license-url]
 
 Bem-vindo! O LerArquivoExecutaSQL V2 é um importador incremental de dados para
 SQL Server. Ele lê arquivos SQL em UTF-16, classifica cada lote de acordo com um
@@ -348,3 +352,14 @@ o repositório anterior.
 O projeto é disponibilizado sob os termos descritos na [licença MIT](LICENSE).
 O aviso de copyright e as condições da licença devem ser preservados conforme o
 arquivo da licença.
+
+[contributors-shield]: https://img.shields.io/github/contributors/J-o-n-a-s/LerArquivoExecutaSQL-V2.svg?style=for-the-badge
+[contributors-url]: https://github.com/J-o-n-a-s/LerArquivoExecutaSQL-V2/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/J-o-n-a-s/LerArquivoExecutaSQL-V2.svg?style=for-the-badge
+[forks-url]: https://github.com/J-o-n-a-s/LerArquivoExecutaSQL-V2/network/members
+[stars-shield]: https://img.shields.io/github/stars/J-o-n-a-s/LerArquivoExecutaSQL-V2.svg?style=for-the-badge
+[stars-url]: https://github.com/J-o-n-a-s/LerArquivoExecutaSQL-V2/stargazers
+[issues-shield]: https://img.shields.io/github/issues/J-o-n-a-s/LerArquivoExecutaSQL-V2.svg?style=for-the-badge
+[issues-url]: https://github.com/J-o-n-a-s/LerArquivoExecutaSQL-V2/issues
+[license-shield]: https://img.shields.io/github/license/J-o-n-a-s/LerArquivoExecutaSQL-V2.svg?style=for-the-badge
+[license-url]: https://github.com/J-o-n-a-s/LerArquivoExecutaSQL-V2/blob/main/LICENSE
