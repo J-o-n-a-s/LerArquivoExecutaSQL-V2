@@ -1,5 +1,5 @@
 [project]
 name = "ler-arquivo-executa-sql-v2"
-version = "0.1.0"
+version = "0.2.0"
 description = "Importador incremental de dados SQL Server com classificação conservadora e análise offline."
 requires-python = ">=3.13"
