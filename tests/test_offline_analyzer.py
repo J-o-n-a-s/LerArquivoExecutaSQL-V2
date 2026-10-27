@@ -104,6 +104,122 @@ class OfflineAnalyzerTests(unittest.TestCase):
         if reason is not None:
             self.assertEqual(report.motivo_recusa, reason)
 
+    def test_format_count_uses_brazilian_thousands_separator(self):
+        offline = self.module()
+        cases = {
+            0: "0",
+            7: "7",
+            412: "412",
+            1_000: "1.000",
+            111_672: "111.672",
+            1_000_000: "1.000.000",
+            11_193_365: "11.193.365",
+            11_069_053: "11.069.053",
+            11_068_070: "11.068.070",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(offline.format_count(value), expected)
+
+    def test_cli_formats_all_three_offline_modes_without_mutating_reports(self):
+        offline = self.module()
+        discovery = offline.DatabaseDiscoveryReport(
+            status=offline.DiscoveryStatus.DETERMINADO,
+            banco_candidato="SCADA",
+            bancos_candidatos=("SCADA",),
+            confianca="evidência estrutural consistente",
+            cobertura=offline.Coverage.COMPLETA,
+            linhas_fisicas_lidas=11_193_365,
+            lotes_analisados=111_672,
+            processamento_completo=True,
+            motivo_interrupcao=None,
+        )
+        inventory = offline.InventoryReport(
+            status=offline.InventoryStatus.CONCLUIDO,
+            cobertura=offline.Coverage.COMPLETA,
+            linhas_fisicas=11_193_365,
+            lotes=111_672,
+            comandos=11_069_053,
+            comandos_reconhecidos=11_069_053,
+            inserts=11_068_070,
+            identity_insert=412,
+            session_set=0,
+            use=1_000,
+            ddl_reconhecido=1_000_000,
+            create_database=7,
+            alter_database=0,
+            views=111_672,
+            outras_familias=412,
+            lotes_nao_classificaveis=0,
+            bancos_candidatos=("SCADA",),
+            processamento_completo=True,
+            motivo_interrupcao=None,
+        )
+        strict = offline.OfflineAnalysisReport(
+            status=offline.AnalysisStatus.RECUSADO,
+            linhas_fisicas_lidas=11_193_365,
+            linhas_ignoradas=111_672,
+            comandos_classificados=11_069_053,
+            inserts_classificados=11_068_070,
+            identity_insert_classificados=412,
+            session_set_classificados=0,
+            linha_primeira_recusa=111_672,
+            motivo_recusa="Motivo sintético.",
+            motivo_interrupcao=None,
+            processamento_completo=False,
+        )
+
+        cases = (
+            (
+                ["--file", "fixture.sql"],
+                "discover_database_file",
+                discovery,
+                0,
+                ("Linhas físicas lidas: 11.193.365", "Lotes analisados: 111.672"),
+            ),
+            (
+                ["--file", "fixture.sql", "--inventory"],
+                "inventory_file",
+                inventory,
+                0,
+                (
+                    "Linhas físicas: 11.193.365",
+                    "Lotes: 111.672",
+                    "Comandos com contagem segura: 11.069.053",
+                    "INSERT: 11.068.070",
+                    "IDENTITY_INSERT: 412",
+                    "SESSION_SET: 0",
+                    "USE: 1.000",
+                    "DDL reconhecido: 1.000.000",
+                ),
+            ),
+            (
+                ["--file", "fixture.sql", "--database", DESTINATION],
+                "analyze_file",
+                strict,
+                2,
+                (
+                    "Linhas físicas lidas: 11.193.365",
+                    "Linhas ignoradas pelo leitor: 111.672",
+                    "Comandos classificados: 11.069.053",
+                    "INSERT classificados: 11.068.070",
+                    "Linha da primeira recusa: 111.672",
+                ),
+            ),
+        )
+        for arguments, function, report, expected_code, expected_lines in cases:
+            with self.subTest(mode=function):
+                output = io.StringIO()
+                with patch.object(offline, function, return_value=report), contextlib.redirect_stdout(output):
+                    code = offline.main(arguments)
+                self.assertEqual(code, expected_code)
+                for expected in expected_lines:
+                    self.assertIn(expected, output.getvalue())
+
+        self.assertEqual(discovery.linhas_fisicas_lidas, 11_193_365)
+        self.assertEqual(inventory.comandos, 11_069_053)
+        self.assertEqual(strict.inserts_classificados, 11_068_070)
+
     def test_report_is_typed_immutable_and_classification_only(self):
         offline = self.module()
         expected = {
@@ -364,15 +480,18 @@ class OfflineAnalyzerTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue().splitlines()[-1], "Erro: argumentos inválidos.")
         self.assertNotIn(private_path, stderr.getvalue())
 
-    def test_cli_missing_required_argument_uses_fixed_error(self):
+    def test_cli_missing_database_selects_discovery_without_leaking_path(self):
         offline = self.module()
-        stderr = io.StringIO()
-        with patch("builtins.open", side_effect=AssertionError("abriu arquivo sem database")), contextlib.redirect_stderr(stderr):
-            with self.assertRaises(SystemExit) as stopped:
-                offline.main(["--file", PRIVATE])
-        self.assertEqual(stopped.exception.code, 2)
-        self.assertEqual(stderr.getvalue().splitlines()[-1], "Erro: argumentos inválidos.")
-        self.assertNotIn(PRIVATE, stderr.getvalue())
+        context = MagicMock()
+        context.__enter__.return_value = io.StringIO("")
+        context.__exit__.return_value = False
+        output = io.StringIO()
+        with patch("builtins.open", return_value=context) as opened, contextlib.redirect_stdout(output):
+            code = offline.main(["--file", PRIVATE])
+        self.assertEqual(code, 4)
+        opened.assert_called_once_with(PRIVATE, "r", encoding="utf-16")
+        self.assertIn("Modo: descoberta de banco", output.getvalue())
+        self.assertNotIn(PRIVATE, output.getvalue())
 
     def test_cli_option_without_value_uses_fixed_error(self):
         offline = self.module()

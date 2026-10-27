@@ -153,9 +153,67 @@ persistência.
 
 ## Analisador offline
 
-O analisador offline abre somente o arquivo solicitado, usa o destino lógico
-informado e percorre o mesmo `SQLCommandReader`. Ele não abre conexão, não executa
-SQL, não cria transação e não simula commit.
+O analisador offline possui três modos independentes. Todos abrem somente o
+arquivo UTF-16 solicitado, usam leitura limitada por linha e conservam no máximo
+o lote corrente. Nenhum abre conexão, executa SQL, cria transação, simula commit
+ou consulta configurações do importador.
+
+`SQLBatchReader` concentra a separação incremental de lotes e o estado lexical
+de strings, identificadores, comentários e `GO`. O `SQLCommandReader` estrito
+continua aplicando seu contrato fail-closed sobre esses lotes. As ferramentas
+offline reutilizam `SQLBatchReader`, `tokenize_sql` e a classificação sintática,
+evitando um segundo lexer.
+
+### Descoberta de banco
+
+Sem `--database`, o analisador reúne somente nomes associados a evidências
+estruturais: `CREATE DATABASE`, `ALTER DATABASE`, `USE` isolado e banco explícito
+em `INSERT` com alvo de três partes. Tokens de string e comentário nunca viram
+evidência. Um `USE master` é mantido como contexto administrativo e não concorre
+com um destino corroborado por evidência mais forte.
+
+Antes de entrar no relatório público, o nome precisa ser inteiramente
+imprimível. Quebras de linha, controles C0/C1, escapes de terminal e outros
+caracteres não imprimíveis invalidam a evidência, impedindo que um identificador
+delimitado manipule a apresentação do terminal.
+
+Evidências estruturais fortes divergentes, ou um `USE` não administrativo
+divergente, produzem ambiguidade. Sem evidência, o banco não é determinado. A
+descoberta tem limite padrão de 256 fronteiras de lote. Atingir esse teto produz
+cobertura preliminar, nunca uma afirmação de unicidade sobre o restante do
+arquivo.
+
+### Inventário offline
+
+O inventário percorre o arquivo completo quando as fronteiras permanecem
+confiáveis. Cada lote é tokenizado antes da classificação. Comandos aceitos no
+modo estrito são contados sem guardar seu texto; DDL, views e administração de
+banco reconhecidos são descritos, mas não autorizados nem convertidos em
+comandos executáveis.
+
+Uma palavra inicial conhecida não basta para declarar um comando. Famílias para
+as quais não existe gramática integral reutilizável ficam como conteúdo não
+classificável quando a quantidade de instruções não pode ser provada. Formas
+administrativas com sufixo só fornecem contagem e evidência quando o
+classificador restrito valida o lote completo; a única exceção offline direta é
+a forma fechada `CREATE DATABASE <identificador>` sem conteúdo adicional.
+
+Uma recusa sintática não reutiliza o `SQLCommandReader` invalidado. O lote é
+registrado como não classificável e o inventário só tenta continuar depois da
+fronteira `GO` que já foi reconhecida pelo leitor lexical. Falha lexical,
+estouro de linha/lote ou perda de sincronização encerra a contagem segura e
+marca cobertura parcial. Contadores de lotes anteriores são preservados.
+
+“Lotes” e “comandos” não são equivalentes. Um lote pode conter vários comandos;
+por outro lado, um lote ambíguo pode ser contabilizado sem que se atribua a ele
+uma quantidade inventada de comandos. “Completo” significa que o EOF foi
+alcançado, mesmo que existam lotes explicitamente não classificáveis.
+
+### Validação estrita
+
+Com `--database`, o comportamento anterior permanece: o destino lógico é
+informado explicitamente e o mesmo `SQLCommandReader` para na primeira recusa.
+Descoberta e inventário não alimentam silenciosamente esse destino.
 
 O relatório informa se a análise foi concluída, recusada ou interrompida, além de
 linhas lidas, linhas ignoradas, comandos classificados por tipo e a primeira

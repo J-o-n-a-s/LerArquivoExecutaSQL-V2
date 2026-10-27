@@ -11,8 +11,9 @@ SQL Server. Ele lê arquivos SQL em UTF-16, classifica cada lote de acordo com u
 subconjunto conservador de T-SQL e encaminha ao banco somente os comandos
 explicitamente aceitos.
 
-A V2 também oferece um analisador offline. Assim, é possível verificar o arquivo
-e localizar a primeira recusa sem instalar SQL Server, `pyodbc` ou driver ODBC.
+A V2 também oferece descoberta automática do provável banco e inventário
+incremental offline, além da validação estrita que localiza a primeira recusa.
+Esses modos não exigem SQL Server, `pyodbc` ou driver ODBC.
 
 ## Origem e motivação
 
@@ -49,7 +50,8 @@ Git antigo não precisa ser importado para o repositório da V2.
 - execução e confirmação individuais, com indicação de resultados parciais ou
   de confirmação desconhecida;
 - estatísticas separadas de leitura, classificação, execução e commit;
-- analisador offline independente de conexão com SQL Server.
+- analisador offline com descoberta de banco, inventário incremental e
+  validação estrita, independente de conexão com SQL Server.
 
 Consulte [Arquitetura e decisões](docs/ARQUITETURA_E_DECISOES.md) para entender o
 porquê do desenho e [Contrato SQL](docs/CONTRATO_SQL.md) para conhecer o
@@ -69,7 +71,10 @@ Necessita apenas de:
 - Python compatível;
 - código do projeto;
 - arquivo SQL UTF-16;
-- nome lógico do banco de destino.
+- nome lógico do banco de destino somente no modo estrito com `--database`.
+
+A descoberta e o inventário não exigem nome de banco. A descoberta é escolhida
+pela ausência de `--database`; o inventário é escolhido por `--inventory`.
 
 Não necessita de SQL Server, `pyodbc`, driver ODBC ou conexão de rede com banco.
 
@@ -155,7 +160,78 @@ Microsoft. A aplicação não adiciona opções inseguras à connection string.
 
 ### Analisar o arquivo sem conexão
 
-Esta é a etapa recomendada antes de qualquer tentativa de importação:
+Há três modos offline. A ausência de `--database` seleciona somente a descoberta
+de banco:
+
+```powershell
+python src/offline_analyzer.py --file "C:\DadosSinteticos\entrada.sql"
+```
+
+O modo examina evidências estruturais como `CREATE DATABASE`, `ALTER DATABASE`,
+`USE` e alvos `INSERT` com três partes. Comentários e strings são tratados pelo
+mesmo lexer do importador. Bancos administrativos, como `master`, não substituem
+um destino corroborado por criação, alteração ou alvo qualificado. Evidências
+incompatíveis produzem resultado ambíguo; ausência de evidência produz
+`banco não determinado`.
+
+A descoberta examina no máximo 256 fronteiras de lote por execução. Se atingir
+esse limite, a cobertura é **preliminar**: o candidato vale apenas para o trecho
+examinado e não afirma unicidade no restante do arquivo. Chegar ao EOF produz
+cobertura completa; erro lexical, de leitura ou limite defensivo produz cobertura
+parcial.
+
+Para percorrer o arquivo e inventariar inclusive famílias que o contrato de
+importação reconhece mas recusa:
+
+```powershell
+python src/offline_analyzer.py --file "C:\DadosSinteticos\entrada.sql" --inventory
+```
+
+O inventário separa linhas físicas, lotes, comandos com contagem segura,
+`INSERT`, `IDENTITY_INSERT`, configurações de sessão, `USE`, DDL, administração
+de banco, views, outras famílias e lotes não classificáveis. Um lote recusado
+não é autorizado: a análise cria um contexto offline novo no lote seguinte e só
+continua depois de um `GO` reconhecido fora de strings e comentários. Se a
+estrutura não permite contar comandos com segurança, nenhum número é inventado;
+o lote é registrado como não classificável. Reconhecer superficialmente uma
+palavra inicial como `SELECT`, `UPDATE` ou `EXEC` não comprova que o lote possua
+uma única instrução. A contagem só é publicada quando a estrutura inteira foi
+validada pelo classificador restrito ou corresponde a uma forma offline fechada.
+
+#### Validação prática do inventário offline
+
+Em 26/10/2026, o inventário foi validado com um arquivo SQL real de mais de
+9 GB, examinado integralmente em modo offline. O resultado observado foi:
+
+- cobertura: completa;
+- linhas físicas: 11.193.365;
+- lotes: 111.672;
+- comandos com contagem segura: 11.069.053;
+- `INSERT` reconhecidos: 11.068.070;
+- lotes não classificáveis: 25;
+- conexão com SQL Server: nenhuma.
+
+Cobertura completa significa que o arquivo chegou ao fim, não que todos os
+comandos foram classificados. Os 25 lotes não classificáveis continuam exigindo
+investigação antes de qualquer plano de importação. Essa validação não demonstra
+que a importação real funcione com SQL Server e nenhum registro foi gravado em
+banco de dados.
+
+Em terminal interativo, o inventário apresenta uma mensagem inicial e atualiza o
+progresso aproximadamente a cada cinco segundos. As atualizações mostram linhas
+físicas, lotes, tempo decorrido e, quando a posição binária está disponível, um
+percentual estimado. Esse percentual usa a posição do buffer binário, que pode
+estar adiantada pela leitura antecipada; por isso não representa uma medição
+exata e nunca chega a 100% antes da confirmação do fim do arquivo.
+
+O progresso é enviado para `stderr`, enquanto o relatório final permanece em
+`stdout`. Quando `stderr` não é um terminal, como em redirecionamentos e
+pipelines, as atualizações são desativadas automaticamente e a saída anterior
+permanece estável. Em uma interrupção tratada, as atualizações já exibidas não
+são apagadas e o relatório parcial continua sendo apresentado.
+
+O modo estrito existente continua disponível e é a etapa recomendada antes de
+qualquer tentativa de importação:
 
 ```powershell
 python src/offline_analyzer.py --file "C:\DadosSinteticos\entrada.sql" --database "BancoSintetico"
@@ -169,12 +245,26 @@ O relatório apresenta status, processamento completo ou parcial, linhas lidas e
 ignoradas, comandos classificados por tipo e a primeira recusa. A análise para
 nessa recusa; lotes posteriores não são inventariados.
 
-| Código de saída | Resultado |
-|---:|---|
-| 0 | análise concluída até o fim do arquivo |
-| 1 | falha sanitizada de abertura ou leitura |
-| 2 | instrução recusada pelo classificador |
-| 130 | interrupção pelo usuário |
+Nos três modos offline, todos os contadores usam ponto como separador de milhar,
+independentemente da configuração regional do sistema. Por exemplo,
+`11.193.365 linhas` e `11.069.053 comandos`. Essa formatação afeta somente a
+apresentação textual; os valores numéricos internos permanecem inalterados.
+
+`--inventory` e `--database` não podem ser combinados. Nenhum modo offline lê as
+variáveis de conexão, abre conexão, executa SQL, altera o arquivo ou preenche a
+configuração usada por `main.py`.
+
+| Código | Descoberta | Inventário | Validação estrita |
+|---:|---|---|---|
+| 0 | candidato encontrado | arquivo integralmente percorrido | análise concluída |
+| 1 | falha sanitizada de abertura/leitura | falha sanitizada antes do inventário | falha sanitizada de abertura/leitura |
+| 2 | argumentos inválidos | argumentos inválidos | instrução recusada ou argumentos inválidos |
+| 3 | candidatos ambíguos | cobertura parcial | — |
+| 4 | banco não determinado | — | — |
+| 130 | interrupção pelo usuário | interrupção pelo usuário | interrupção pelo usuário |
+
+Um inventário parcial preserva apenas contadores já validados antes da perda de
+sincronização, falha ou limite.
 
 ### Iniciar o importador interativo
 
@@ -266,6 +356,7 @@ logs locais em contribuições públicas.
 ├── src/
 │   ├── main.py
 │   ├── offline_analyzer.py
+│   ├── offline_inspection.py
 │   ├── sql_classifier.py
 │   ├── data_only_policy.py
 │   ├── preflight.py

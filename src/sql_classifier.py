@@ -8,7 +8,7 @@ import io
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import NoReturn, TextIO, cast
+from typing import NoReturn, TextIO, TypeAlias, cast
 
 from preflight import (
     CreateDatabaseProfile,
@@ -115,6 +115,11 @@ class _Token:
     start: int
     end: int
     line: int
+
+
+# Interface lexical somente-leitura usada por ferramentas offline. Os valores
+# permanecem internos ao processo e nunca devem ser incluídos em diagnósticos.
+SQLToken: TypeAlias = _Token
 
 
 class _LineContext:
@@ -257,6 +262,16 @@ def _tokens(text, first_line):
             index += 1
             kind = "SYMBOL"
         yield _Token(kind, text[start:index], start, index, token_line)
+
+
+def tokenize_sql(text: str, first_line: int = 1) -> Iterator[SQLToken]:
+    """Tokeniza um lote com as mesmas regras lexicais do importador.
+
+    A função não classifica, autoriza ou executa instruções. Ela existe para
+    impedir que analisadores offline mantenham uma segunda implementação de
+    comentários, strings e identificadores delimitados.
+    """
+    yield from _tokens(text, first_line)
 
 
 class _Parser:
@@ -918,6 +933,78 @@ def _commands(text, first_line, *, authorize=None, authorize_session=None,
         yield SQLCommand(text[start:parser.last_end], line, kind)
 
 
+def classify_offline_batch(text: str, first_line: int = 1) -> Iterator[SQLCommand]:
+    """Aplica a classificação sintática estrita sem contexto ou autorização.
+
+    Os comandos retornados são apenas resultados léxicos. Esta função não abre
+    conexões e não faz parte do caminho que decide execução no importador.
+    """
+    yield from _commands(text, first_line)
+
+
+class SQLBatchReader:
+    """Separa lotes ``GO`` incrementalmente usando o lexer compartilhado.
+
+    O leitor aplica os mesmos limites físicos do caminho estrito e conserva no
+    máximo o lote atual. Ele não classifica nem autoriza o conteúdo.
+    """
+
+    def __init__(
+            self,
+            file: TextIO,
+            *,
+            on_line: Callable[[int], None] | None = None,
+    ) -> None:
+        self.file = file
+        self.on_line = on_line
+        self.line_number = 0
+        self.ignored_lines = 0
+        self.reached_eof = False
+
+    def __iter__(self) -> Iterator[tuple[str, int, int]]:
+        context = _LineContext()
+        buffer = io.StringIO()
+        size = 0
+        start_line = 1
+        code_lines = 0
+        while True:
+            line = self.file.readline(MAX_LINE_CHARS + 1)
+            if not line:
+                self.reached_eof = True
+                if size:
+                    yield buffer.getvalue(), start_line, code_lines
+                return
+            self.line_number += 1
+            if self.on_line:
+                self.on_line(self.line_number)
+            if len(line) > MAX_LINE_CHARS:
+                raise SQLClassificationError(
+                    self.line_number,
+                    "Limite de tamanho da linha excedido.",
+                )
+            visible = context.scan(line, self.line_number)
+            if visible.upper() == "GO" and not context.quote and not context.depth:
+                self.ignored_lines += 1
+                batch = buffer.getvalue()
+                buffer = io.StringIO()
+                old_start, old_code = start_line, code_lines
+                size = code_lines = 0
+                start_line = self.line_number + 1
+                yield batch, old_start, old_code
+                continue
+            if not visible:
+                self.ignored_lines += 1
+            else:
+                code_lines += 1
+            size += len(line)
+            if size > MAX_BATCH_CHARS:
+                raise SQLClassificationError(
+                    self.line_number,
+                    "Limite de tamanho do lote excedido.",
+                )
+            buffer.write(line)
+
+
 class SQLCommandReader:
     """Lê texto SQL incrementalmente e emite apenas comandos autorizados.
 
@@ -1009,40 +1096,20 @@ class SQLCommandReader:
         return True
 
     def _batches(self) -> Iterator[tuple[str, int, int]]:
-        context = _LineContext()
-        buffer = io.StringIO()
-        size = 0
-        start_line = 1
-        code_lines = 0
-        while True:
-            line = self.file.readline(MAX_LINE_CHARS + 1)
-            if not line:
-                if size:
-                    yield buffer.getvalue(), start_line, code_lines
-                return
-            self.line_number += 1
-            if self.on_line:
-                self.on_line(self.line_number)
-            if len(line) > MAX_LINE_CHARS:
-                raise SQLClassificationError(self.line_number, "Limite de tamanho da linha excedido.")
-            visible = context.scan(line, self.line_number)
-            if visible.upper() == "GO" and not context.quote and not context.depth:
-                self.ignored_lines += 1
-                batch = buffer.getvalue()
-                buffer = io.StringIO()
-                old_start, old_code = start_line, code_lines
-                size = code_lines = 0
-                start_line = self.line_number + 1
-                yield batch, old_start, old_code
-                continue
-            if not visible:
-                self.ignored_lines += 1
-            else:
-                code_lines += 1
-            size += len(line)
-            if size > MAX_BATCH_CHARS:
-                raise SQLClassificationError(self.line_number, "Limite de tamanho do lote excedido.")
-            buffer.write(line)
+        batch_reader = SQLBatchReader(self.file, on_line=self.on_line)
+        scanner_ignored = 0
+        try:
+            for batch in batch_reader:
+                semantic_ignored = self.ignored_lines - scanner_ignored
+                scanner_ignored = batch_reader.ignored_lines
+                self.line_number = batch_reader.line_number
+                self.ignored_lines = scanner_ignored + semantic_ignored
+                yield batch
+        finally:
+            semantic_ignored = self.ignored_lines - scanner_ignored
+            scanner_ignored = batch_reader.ignored_lines
+            self.line_number = batch_reader.line_number
+            self.ignored_lines = scanner_ignored + semantic_ignored
 
     def __iter__(self) -> Iterator[SQLCommand]:
         """Emite comandos na ordem de origem após validar o lote completo.

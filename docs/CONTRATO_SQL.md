@@ -300,3 +300,15 @@ Ela não prova:
 
 A análise offline aplica exatamente essa classificação sem consultar o banco. A
 validação operacional precisa ser feita separadamente em um ambiente controlado.
+
+## I. Descoberta e inventário não ampliam a autorização
+
+A descoberta de banco e o inventário offline podem reconhecer nomes, famílias e
+formas que permanecem recusadas por este contrato. Esse reconhecimento serve
+somente para relatório. Ele não transforma DDL, views, administração ou outras
+famílias em `SQLCommand`, não configura o destino do importador e não permite que
+um lote inventariado alcance o cursor.
+
+No inventário, uma recusa pode ser seguida por análise de outro lote apenas
+porque uma nova fronteira lexical `GO` cria um contexto offline independente. O
+leitor estrito continua inválido após a primeira recusa e não é retomado.
